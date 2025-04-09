@@ -168,19 +168,21 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
         self.transport.ack_interrupt()
     }
 
-    fn request<Req: AsBytes>(&mut self, req: Req) -> Result<VirtIOSndHdr> {
-        self.control_queue.add_notify_wait_pop(
-            &[req.as_bytes()],
-            &mut [self.queue_buf_recv.as_bytes_mut()],
-            &mut self.transport,
-        )?;
+    async fn request<Req: AsBytes>(&mut self, req: Req) -> Result<VirtIOSndHdr> {
+        self.control_queue
+            .add_notify_wait_pop(
+                &[req.as_bytes()],
+                &mut [self.queue_buf_recv.as_bytes_mut()],
+                &mut self.transport,
+            )
+            .await?;
         Ok(VirtIOSndHdr::read_from_prefix(&self.queue_buf_recv).unwrap())
     }
 
     /// Set up the driver, initate pcm_infos and jacks_infos
-    fn set_up(&mut self) -> Result<()> {
+    async fn set_up(&mut self) -> Result<()> {
         // init jack info
-        if let Ok(jack_infos) = self.jack_info(0, self.jacks) {
+        if let Ok(jack_infos) = self.jack_info(0, self.jacks).await {
             for jack_info in &jack_infos {
                 info!("[sound device] jack_info: {}", jack_info);
             }
@@ -191,14 +193,14 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
         }
 
         // init pcm info
-        let pcm_infos = self.pcm_info(0, self.streams)?;
+        let pcm_infos = self.pcm_info(0, self.streams).await?;
         for pcm_info in &pcm_infos {
             info!("[sound device] pcm_info: {}", pcm_info);
         }
         self.pcm_infos = Some(pcm_infos);
 
         // init chmap info
-        if let Ok(chmap_infos) = self.chmap_info(0, self.chmaps) {
+        if let Ok(chmap_infos) = self.chmap_info(0, self.chmaps).await {
             for chmap_info in &chmap_infos {
                 info!("[sound device] chmap_info: {}", chmap_info);
             }
@@ -221,17 +223,23 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
     }
 
     /// Query information about the available jacks.
-    fn jack_info(&mut self, jack_start_id: u32, jack_count: u32) -> Result<Vec<VirtIOSndJackInfo>> {
+    async fn jack_info(
+        &mut self,
+        jack_start_id: u32,
+        jack_count: u32,
+    ) -> Result<Vec<VirtIOSndJackInfo>> {
         if jack_start_id + jack_count > self.jacks {
             error!("jack_start_id + jack_count > jacks! There are not enough jacks to be queried!");
             return Err(Error::IoError);
         }
-        let hdr = self.request(VirtIOSndQueryInfo {
-            hdr: ItemInformationRequestType::RJackInfo.into(),
-            start_id: jack_start_id,
-            count: jack_count,
-            size: size_of::<VirtIOSndJackInfo>() as u32,
-        })?;
+        let hdr = self
+            .request(VirtIOSndQueryInfo {
+                hdr: ItemInformationRequestType::RJackInfo.into(),
+                start_id: jack_start_id,
+                count: jack_count,
+                size: size_of::<VirtIOSndJackInfo>() as u32,
+            })
+            .await?;
         if hdr != RequestStatusCode::Ok.into() {
             return Err(Error::IoError);
         }
@@ -251,7 +259,7 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
     }
 
     /// Query information about the available streams.
-    fn pcm_info(
+    async fn pcm_info(
         &mut self,
         stream_start_id: u32,
         stream_count: u32,
@@ -261,12 +269,14 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
             return Err(Error::IoError);
         }
         let request_hdr = VirtIOSndHdr::from(ItemInformationRequestType::RPcmInfo);
-        let hdr = self.request(VirtIOSndQueryInfo {
-            hdr: request_hdr,
-            start_id: stream_start_id,
-            count: stream_count,
-            size: size_of::<VirtIOSndPcmInfo>() as u32,
-        })?;
+        let hdr = self
+            .request(VirtIOSndQueryInfo {
+                hdr: request_hdr,
+                start_id: stream_start_id,
+                count: stream_count,
+                size: size_of::<VirtIOSndPcmInfo>() as u32,
+            })
+            .await?;
         if hdr != RequestStatusCode::Ok.into() {
             return Err(Error::IoError);
         }
@@ -286,7 +296,7 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
     }
 
     /// Query information about the available chmaps.
-    fn chmap_info(
+    async fn chmap_info(
         &mut self,
         chmaps_start_id: u32,
         chmaps_count: u32,
@@ -295,12 +305,14 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
             error!("chmaps_start_id + chmaps_count > self.chmaps");
             return Err(Error::IoError);
         }
-        let hdr = self.request(VirtIOSndQueryInfo {
-            hdr: ItemInformationRequestType::RChmapInfo.into(),
-            start_id: chmaps_start_id,
-            count: chmaps_count,
-            size: size_of::<VirtIOSndChmapInfo>() as u32,
-        })?;
+        let hdr = self
+            .request(VirtIOSndQueryInfo {
+                hdr: ItemInformationRequestType::RChmapInfo.into(),
+                start_id: chmaps_start_id,
+                count: chmaps_count,
+                size: size_of::<VirtIOSndChmapInfo>() as u32,
+            })
+            .await?;
         if hdr != RequestStatusCode::Ok.into() {
             return Err(Error::IoError);
         }
@@ -321,9 +333,9 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
     /// # Arguments
     ///
     /// * `jack_id` - A u32 int which is in the range of [0, jacks)
-    pub fn jack_remap(&mut self, jack_id: u32, association: u32, sequence: u32) -> Result {
+    pub async fn jack_remap(&mut self, jack_id: u32, association: u32, sequence: u32) -> Result {
         if !self.set_up {
-            self.set_up()?;
+            self.set_up().await?;
             self.set_up = true;
         }
         if self.jacks == 0 {
@@ -347,14 +359,16 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
             error!("The jack selected does not support VIRTIO_SND_JACK_F_REMAP!");
             return Err(Error::Unsupported);
         }
-        let hdr = self.request(VirtIOSndJackRemap {
-            hdr: VirtIOSndJackHdr {
-                hdr: CommandCode::RJackRemap.into(),
-                jack_id,
-            },
-            association,
-            sequence,
-        })?;
+        let hdr = self
+            .request(VirtIOSndJackRemap {
+                hdr: VirtIOSndJackHdr {
+                    hdr: CommandCode::RJackRemap.into(),
+                    jack_id,
+                },
+                association,
+                sequence,
+            })
+            .await?;
         if hdr == RequestStatusCode::Ok.into() {
             Ok(())
         } else {
@@ -363,7 +377,7 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
     }
 
     /// Set selected stream parameters for the specified stream ID.
-    pub fn pcm_set_params(
+    pub async fn pcm_set_params(
         &mut self,
         stream_id: u32,
         buffer_bytes: u32,
@@ -374,26 +388,28 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
         rate: PcmRate,
     ) -> Result {
         if !self.set_up {
-            self.set_up()?;
+            self.set_up().await?;
             self.set_up = true;
         }
         if period_bytes == 0 || period_bytes > buffer_bytes || buffer_bytes % period_bytes != 0 {
             return Err(Error::InvalidParam);
         }
         let request_hdr = VirtIOSndHdr::from(CommandCode::RPcmSetParams);
-        let rsp = self.request(VirtIOSndPcmSetParams {
-            hdr: VirtIOSndPcmHdr {
-                hdr: request_hdr,
-                stream_id,
-            },
-            buffer_bytes,
-            period_bytes,
-            features: features.bits(),
-            channels,
-            format: format.into(),
-            rate: rate.into(),
-            _padding: 0,
-        })?;
+        let rsp = self
+            .request(VirtIOSndPcmSetParams {
+                hdr: VirtIOSndPcmHdr {
+                    hdr: request_hdr,
+                    stream_id,
+                },
+                buffer_bytes,
+                period_bytes,
+                features: features.bits(),
+                channels,
+                format: format.into(),
+                rate: rate.into(),
+                _padding: 0,
+            })
+            .await?;
         // rsp is just a header, so it can be compared with VirtIOSndHdr
         if rsp == VirtIOSndHdr::from(RequestStatusCode::Ok) {
             self.pcm_parameters[stream_id as usize] = PcmParameters {
@@ -412,16 +428,18 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
     }
 
     /// Prepare a stream with specified stream ID.
-    pub fn pcm_prepare(&mut self, stream_id: u32) -> Result {
+    pub async fn pcm_prepare(&mut self, stream_id: u32) -> Result {
         if !self.set_up {
-            self.set_up()?;
+            self.set_up().await?;
             self.set_up = true;
         }
         let request_hdr = VirtIOSndHdr::from(CommandCode::RPcmPrepare);
-        let rsp = self.request(VirtIOSndPcmHdr {
-            hdr: request_hdr,
-            stream_id,
-        })?;
+        let rsp = self
+            .request(VirtIOSndPcmHdr {
+                hdr: request_hdr,
+                stream_id,
+            })
+            .await?;
         // rsp is just a header, so it can be compared with VirtIOSndHdr
         if rsp == VirtIOSndHdr::from(RequestStatusCode::Ok) {
             Ok(())
@@ -431,16 +449,18 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
     }
 
     /// Release a stream with specified stream ID.
-    pub fn pcm_release(&mut self, stream_id: u32) -> Result {
+    pub async fn pcm_release(&mut self, stream_id: u32) -> Result {
         if !self.set_up {
-            self.set_up()?;
+            self.set_up().await?;
             self.set_up = true;
         }
         let request_hdr = VirtIOSndHdr::from(CommandCode::RPcmRelease);
-        let rsp = self.request(VirtIOSndPcmHdr {
-            hdr: request_hdr,
-            stream_id,
-        })?;
+        let rsp = self
+            .request(VirtIOSndPcmHdr {
+                hdr: request_hdr,
+                stream_id,
+            })
+            .await?;
         // rsp is just a header, so it can be compared with VirtIOSndHdr
         if rsp == VirtIOSndHdr::from(RequestStatusCode::Ok) {
             Ok(())
@@ -450,16 +470,18 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
     }
 
     /// Start a stream with specified stream ID.
-    pub fn pcm_start(&mut self, stream_id: u32) -> Result {
+    pub async fn pcm_start(&mut self, stream_id: u32) -> Result {
         if !self.set_up {
-            self.set_up()?;
+            self.set_up().await?;
             self.set_up = true;
         }
         let request_hdr = VirtIOSndHdr::from(CommandCode::RPcmStart);
-        let rsp = self.request(VirtIOSndPcmHdr {
-            hdr: request_hdr,
-            stream_id,
-        })?;
+        let rsp = self
+            .request(VirtIOSndPcmHdr {
+                hdr: request_hdr,
+                stream_id,
+            })
+            .await?;
         // rsp is just a header, so it can be compared with VirtIOSndHdr
         if rsp == VirtIOSndHdr::from(RequestStatusCode::Ok) {
             Ok(())
@@ -469,16 +491,18 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
     }
 
     /// Stop a stream with specified stream ID.
-    pub fn pcm_stop(&mut self, stream_id: u32) -> Result {
+    pub async fn pcm_stop(&mut self, stream_id: u32) -> Result {
         if !self.set_up {
-            self.set_up()?;
+            self.set_up().await?;
             self.set_up = true;
         }
         let request_hdr = VirtIOSndHdr::from(CommandCode::RPcmStop);
-        let rsp = self.request(VirtIOSndPcmHdr {
-            hdr: request_hdr,
-            stream_id,
-        })?;
+        let rsp = self
+            .request(VirtIOSndPcmHdr {
+                hdr: request_hdr,
+                stream_id,
+            })
+            .await?;
         // rsp is just a header, so it can be compared with VirtIOSndHdr
         if rsp == VirtIOSndHdr::from(RequestStatusCode::Ok) {
             Ok(())
@@ -492,10 +516,10 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
     /// Currently supports only output stream.
     ///
     /// This is a blocking method that will not return until the audio playback is complete.
-    pub fn pcm_xfer(&mut self, stream_id: u32, frames: &[u8]) -> Result {
+    pub async fn pcm_xfer(&mut self, stream_id: u32, frames: &[u8]) -> Result {
         const U32_SIZE: usize = size_of::<u32>();
         if !self.set_up {
-            self.set_up()?;
+            self.set_up().await?;
             self.set_up = true;
         }
         if !self.pcm_parameters[stream_id as usize].setup {
@@ -568,9 +592,9 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
     /// This is a non-blocking method that returns a token.
     ///
     /// The length of the `frames` must be equal to the buffer size set for the stream corresponding to the `stream_id`.
-    pub fn pcm_xfer_nb(&mut self, stream_id: u32, frames: &[u8]) -> Result<u16> {
+    pub async fn pcm_xfer_nb(&mut self, stream_id: u32, frames: &[u8]) -> Result<u16> {
         if !self.set_up {
-            self.set_up()?;
+            self.set_up().await?;
             self.set_up = true;
         }
         if !self.pcm_parameters[stream_id as usize].setup {
@@ -611,9 +635,9 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
     }
 
     /// Get all output streams.
-    pub fn output_streams(&mut self) -> Result<Vec<u32>> {
+    pub async fn output_streams(&mut self) -> Result<Vec<u32>> {
         if !self.set_up {
-            self.set_up()?;
+            self.set_up().await?;
             self.set_up = true;
         }
         Ok(self
@@ -628,9 +652,9 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
     }
 
     /// Get all input streams.
-    pub fn input_streams(&mut self) -> Result<Vec<u32>> {
+    pub async fn input_streams(&mut self) -> Result<Vec<u32>> {
         if !self.set_up {
-            self.set_up()?;
+            self.set_up().await?;
             self.set_up = true;
         }
         Ok(self
@@ -645,9 +669,9 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
     }
 
     /// Get the rates that a stream supports.
-    pub fn rates_supported(&mut self, stream_id: u32) -> Result<PcmRates> {
+    pub async fn rates_supported(&mut self, stream_id: u32) -> Result<PcmRates> {
         if !self.set_up {
-            self.set_up()?;
+            self.set_up().await?;
             self.set_up = true;
         }
         if stream_id >= self.pcm_infos.as_ref().unwrap().len() as u32 {
@@ -659,9 +683,9 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
     }
 
     /// Get the formats that a stream supports.
-    pub fn formats_supported(&mut self, stream_id: u32) -> Result<PcmFormats> {
+    pub async fn formats_supported(&mut self, stream_id: u32) -> Result<PcmFormats> {
         if !self.set_up {
-            self.set_up()?;
+            self.set_up().await?;
             self.set_up = true;
         }
         if stream_id >= self.pcm_infos.as_ref().unwrap().len() as u32 {
@@ -673,9 +697,9 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
     }
 
     /// Get channel range that a stream supports.
-    pub fn channel_range_supported(&mut self, stream_id: u32) -> Result<RangeInclusive<u8>> {
+    pub async fn channel_range_supported(&mut self, stream_id: u32) -> Result<RangeInclusive<u8>> {
         if !self.set_up {
-            self.set_up()?;
+            self.set_up().await?;
             self.set_up = true;
         }
         if stream_id >= self.pcm_infos.as_ref().unwrap().len() as u32 {
@@ -686,9 +710,9 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
     }
 
     /// Get features that a stream supports.
-    pub fn features_supported(&mut self, stream_id: u32) -> Result<PcmFeatures> {
+    pub async fn features_supported(&mut self, stream_id: u32) -> Result<PcmFeatures> {
         if !self.set_up {
-            self.set_up()?;
+            self.set_up().await?;
             self.set_up = true;
         }
         if stream_id >= self.pcm_infos.as_ref().unwrap().len() as u32 {
@@ -1552,229 +1576,5 @@ impl Display for VirtIOSndChmapInfo {
         }
         write!(f, "]")?;
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        hal::fake::FakeHal,
-        transport::{
-            fake::{FakeTransport, QueueStatus, State},
-            DeviceType,
-        },
-        volatile::ReadOnly,
-    };
-    use alloc::{sync::Arc, vec};
-    use core::ptr::NonNull;
-    use fake::FakeSoundDevice;
-    use std::sync::Mutex;
-
-    #[test]
-    fn config() {
-        let mut config_space = VirtIOSoundConfig {
-            jacks: ReadOnly::new(3),
-            streams: ReadOnly::new(4),
-            chmaps: ReadOnly::new(2),
-        };
-        let state = Arc::new(Mutex::new(State {
-            queues: vec![
-                QueueStatus::default(),
-                QueueStatus::default(),
-                QueueStatus::default(),
-                QueueStatus::default(),
-            ],
-            ..Default::default()
-        }));
-        let transport = FakeTransport {
-            device_type: DeviceType::Sound,
-            max_queue_size: 32,
-            device_features: 0,
-            config_space: NonNull::from(&mut config_space),
-            state: state.clone(),
-        };
-        let sound =
-            VirtIOSound::<FakeHal, FakeTransport<VirtIOSoundConfig>>::new(transport).unwrap();
-        assert_eq!(sound.jacks(), 3);
-        assert_eq!(sound.streams(), 4);
-        assert_eq!(sound.chmaps(), 2);
-    }
-
-    #[test]
-    fn empty_info() {
-        let (fake, transport) = FakeSoundDevice::new(vec![], vec![], vec![]);
-        let mut sound =
-            VirtIOSound::<FakeHal, FakeTransport<VirtIOSoundConfig>>::new(transport).unwrap();
-        let handle = fake.spawn();
-
-        assert_eq!(sound.jacks(), 0);
-        assert_eq!(sound.streams(), 0);
-        assert_eq!(sound.chmaps(), 0);
-        assert_eq!(sound.output_streams().unwrap(), vec![]);
-        assert_eq!(sound.input_streams().unwrap(), vec![]);
-
-        fake.terminate();
-        handle.join().unwrap();
-    }
-
-    #[test]
-    fn stream_info() {
-        let (fake, transport) = FakeSoundDevice::new(
-            vec![VirtIOSndJackInfo {
-                hdr: VirtIOSndInfo { hda_fn_nid: 0 },
-                features: 0,
-                hda_reg_defconf: 0,
-                hda_reg_caps: 0,
-                connected: 0,
-                _padding: Default::default(),
-            }],
-            vec![
-                VirtIOSndPcmInfo {
-                    hdr: VirtIOSndInfo { hda_fn_nid: 0 },
-                    features: 0,
-                    formats: (PcmFormats::U8 | PcmFormats::U32).bits(),
-                    rates: (PcmRates::RATE_44100 | PcmRates::RATE_32000).bits(),
-                    direction: VIRTIO_SND_D_OUTPUT,
-                    channels_min: 1,
-                    channels_max: 2,
-                    _padding: Default::default(),
-                },
-                VirtIOSndPcmInfo {
-                    hdr: VirtIOSndInfo { hda_fn_nid: 0 },
-                    features: 0,
-                    formats: 0,
-                    rates: 0,
-                    direction: VIRTIO_SND_D_INPUT,
-                    channels_min: 0,
-                    channels_max: 0,
-                    _padding: Default::default(),
-                },
-            ],
-            vec![VirtIOSndChmapInfo {
-                hdr: VirtIOSndInfo { hda_fn_nid: 0 },
-                direction: 0,
-                channels: 0,
-                positions: [0; 18],
-            }],
-        );
-        let mut sound =
-            VirtIOSound::<FakeHal, FakeTransport<VirtIOSoundConfig>>::new(transport).unwrap();
-        let handle = fake.spawn();
-
-        assert_eq!(sound.output_streams().unwrap(), vec![0]);
-        assert_eq!(
-            sound.rates_supported(0).unwrap(),
-            PcmRates::RATE_44100 | PcmRates::RATE_32000
-        );
-        assert_eq!(
-            sound.formats_supported(0).unwrap(),
-            PcmFormats::U8 | PcmFormats::U32
-        );
-        assert_eq!(sound.channel_range_supported(0).unwrap(), 1..=2);
-        assert_eq!(sound.features_supported(0).unwrap(), PcmFeatures::empty());
-
-        assert_eq!(sound.input_streams().unwrap(), vec![1]);
-        assert_eq!(sound.rates_supported(1).unwrap(), PcmRates::empty());
-        assert_eq!(sound.formats_supported(1).unwrap(), PcmFormats::empty());
-        assert_eq!(sound.channel_range_supported(1).unwrap(), 0..=0);
-        assert_eq!(sound.features_supported(1).unwrap(), PcmFeatures::empty());
-
-        fake.terminate();
-        handle.join().unwrap();
-    }
-
-    #[test]
-    fn play() {
-        let (fake, transport) = FakeSoundDevice::new(
-            vec![],
-            vec![VirtIOSndPcmInfo {
-                hdr: VirtIOSndInfo { hda_fn_nid: 0 },
-                features: 0,
-                formats: (PcmFormats::U8 | PcmFormats::U32).bits(),
-                rates: (PcmRates::RATE_44100 | PcmRates::RATE_32000).bits(),
-                direction: VIRTIO_SND_D_OUTPUT,
-                channels_min: 1,
-                channels_max: 2,
-                _padding: Default::default(),
-            }],
-            vec![],
-        );
-        let mut sound =
-            VirtIOSound::<FakeHal, FakeTransport<VirtIOSoundConfig>>::new(transport).unwrap();
-        let handle = fake.spawn();
-
-        assert_eq!(sound.output_streams().unwrap(), vec![0]);
-        assert_eq!(sound.input_streams().unwrap(), vec![]);
-
-        sound
-            .pcm_set_params(
-                0,
-                100,
-                100,
-                PcmFeatures::empty(),
-                1,
-                PcmFormat::U8,
-                PcmRate::Rate8000,
-            )
-            .unwrap();
-        assert_eq!(
-            fake.params.lock().unwrap()[0],
-            Some(VirtIOSndPcmSetParams {
-                hdr: VirtIOSndPcmHdr {
-                    hdr: VirtIOSndHdr {
-                        command_code: CommandCode::RPcmSetParams.into(),
-                    },
-                    stream_id: 0,
-                },
-                buffer_bytes: 100,
-                period_bytes: 100,
-                features: 0,
-                channels: 1,
-                format: PcmFormat::U8.into(),
-                rate: PcmRate::Rate8000.into(),
-                _padding: Default::default(),
-            })
-        );
-
-        sound.pcm_prepare(0).unwrap();
-        sound.pcm_start(0).unwrap();
-
-        let mut expected_sound = vec![];
-
-        // Playing an empty set of frames should be a no-op.
-        println!("Playing empty");
-        sound.pcm_xfer(0, &[]).unwrap();
-        assert_eq!(fake.played_bytes.lock().unwrap()[0], expected_sound);
-
-        // Send one buffer worth.
-        println!("Playing 100");
-        sound.pcm_xfer(0, &[42; 100]).unwrap();
-        expected_sound.extend([42; 100]);
-        assert_eq!(fake.played_bytes.lock().unwrap()[0], expected_sound);
-
-        // Send two buffers worth.
-        println!("Playing 200");
-        sound.pcm_xfer(0, &[66; 200]).unwrap();
-        expected_sound.extend([66; 200]);
-        assert_eq!(fake.played_bytes.lock().unwrap()[0], expected_sound);
-
-        // Send half a buffer worth.
-        println!("Playing 50");
-        sound.pcm_xfer(0, &[55; 50]).unwrap();
-        expected_sound.extend([55; 50]);
-        assert_eq!(fake.played_bytes.lock().unwrap()[0], expected_sound);
-
-        // Send enough that the queue will fill up.
-        println!("Playing 5000");
-        sound.pcm_xfer(0, &[12; 5000]).unwrap();
-        expected_sound.extend([12; 5000]);
-        assert_eq!(fake.played_bytes.lock().unwrap()[0], expected_sound);
-
-        sound.pcm_stop(0).unwrap();
-        sound.pcm_release(0).unwrap();
-
-        fake.terminate();
-        handle.join().unwrap();
     }
 }

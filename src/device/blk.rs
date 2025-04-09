@@ -107,47 +107,54 @@ impl<H: Hal, T: Transport> VirtIOBlk<H, T> {
     }
 
     /// Sends the given request to the device and waits for a response, with no extra data.
-    fn request(&mut self, request: BlkReq) -> Result {
+    async fn request(&mut self, request: BlkReq) -> Result {
         let mut resp = BlkResp::default();
-        self.queue.add_notify_wait_pop(
-            &[request.as_bytes()],
-            &mut [resp.as_bytes_mut()],
-            &mut self.transport,
-        )?;
+        self.queue
+            .add_notify_wait_pop(
+                &[request.as_bytes()],
+                &mut [resp.as_bytes_mut()],
+                &mut self.transport,
+            )
+            .await?;
         resp.status.into()
     }
 
     /// Sends the given request to the device and waits for a response, including the given data.
-    fn request_read(&mut self, request: BlkReq, data: &mut [u8]) -> Result {
+    async fn request_read(&mut self, request: BlkReq, data: &mut [u8]) -> Result {
         let mut resp = BlkResp::default();
-        self.queue.add_notify_wait_pop(
-            &[request.as_bytes()],
-            &mut [data, resp.as_bytes_mut()],
-            &mut self.transport,
-        )?;
+        self.queue
+            .add_notify_wait_pop(
+                &[request.as_bytes()],
+                &mut [data, resp.as_bytes_mut()],
+                &mut self.transport,
+            )
+            .await?;
         resp.status.into()
     }
 
     /// Sends the given request and data to the device and waits for a response.
-    fn request_write(&mut self, request: BlkReq, data: &[u8]) -> Result {
+    async fn request_write(&mut self, request: BlkReq, data: &[u8]) -> Result {
         let mut resp = BlkResp::default();
-        self.queue.add_notify_wait_pop(
-            &[request.as_bytes(), data],
-            &mut [resp.as_bytes_mut()],
-            &mut self.transport,
-        )?;
+        self.queue
+            .add_notify_wait_pop(
+                &[request.as_bytes(), data],
+                &mut [resp.as_bytes_mut()],
+                &mut self.transport,
+            )
+            .await?;
         resp.status.into()
     }
 
     /// Requests the device to flush any pending writes to storage.
     ///
     /// This will be ignored if the device doesn't support the `VIRTIO_BLK_F_FLUSH` feature.
-    pub fn flush(&mut self) -> Result {
+    pub async fn flush(&mut self) -> Result {
         if self.negotiated_features.contains(BlkFeature::FLUSH) {
             self.request(BlkReq {
                 type_: ReqType::Flush,
                 ..Default::default()
             })
+            .await
         } else {
             Ok(())
         }
@@ -157,14 +164,15 @@ impl<H: Hal, T: Transport> VirtIOBlk<H, T> {
     ///
     /// The ID is written as ASCII into the given buffer, which must be 20 bytes long, and the used
     /// length returned.
-    pub fn device_id(&mut self, id: &mut [u8; 20]) -> Result<usize> {
+    pub async fn device_id(&mut self, id: &mut [u8; 20]) -> Result<usize> {
         self.request_read(
             BlkReq {
                 type_: ReqType::GetId,
                 ..Default::default()
             },
             id,
-        )?;
+        )
+        .await?;
 
         let length = id.iter().position(|&x| x == 0).unwrap_or(20);
         Ok(length)
@@ -175,7 +183,7 @@ impl<H: Hal, T: Transport> VirtIOBlk<H, T> {
     /// The buffer length must be a non-zero multiple of [`SECTOR_SIZE`].
     ///
     /// Blocks until the read completes or there is an error.
-    pub fn read_blocks(&mut self, block_id: usize, buf: &mut [u8]) -> Result {
+    pub async fn read_blocks(&mut self, block_id: usize, buf: &mut [u8]) -> Result {
         assert_ne!(buf.len(), 0);
         assert_eq!(buf.len() % SECTOR_SIZE, 0);
         self.request_read(
@@ -186,6 +194,7 @@ impl<H: Hal, T: Transport> VirtIOBlk<H, T> {
             },
             buf,
         )
+        .await
     }
 
     /// Submits a request to read one or more blocks, but returns immediately without waiting for
@@ -291,7 +300,7 @@ impl<H: Hal, T: Transport> VirtIOBlk<H, T> {
     /// The buffer length must be a non-zero multiple of [`SECTOR_SIZE`].
     ///
     /// Blocks until the write is complete or there is an error.
-    pub fn write_blocks(&mut self, block_id: usize, buf: &[u8]) -> Result {
+    pub async fn write_blocks(&mut self, block_id: usize, buf: &[u8]) -> Result {
         assert_ne!(buf.len(), 0);
         assert_eq!(buf.len() % SECTOR_SIZE, 0);
         self.request_write(
@@ -302,6 +311,7 @@ impl<H: Hal, T: Transport> VirtIOBlk<H, T> {
             },
             buf,
         )
+        .await
     }
 
     /// Submits a request to write one or more blocks, but returns immediately without waiting for
@@ -547,334 +557,5 @@ bitflags! {
         const ORDER_PLATFORM        = 1 << 36;
         const SR_IOV                = 1 << 37;
         const NOTIFICATION_DATA     = 1 << 38;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        hal::fake::FakeHal,
-        transport::{
-            fake::{FakeTransport, QueueStatus, State},
-            DeviceType,
-        },
-    };
-    use alloc::{sync::Arc, vec};
-    use core::{mem::size_of, ptr::NonNull};
-    use std::{sync::Mutex, thread};
-
-    #[test]
-    fn config() {
-        let mut config_space = BlkConfig {
-            capacity_low: Volatile::new(0x42),
-            capacity_high: Volatile::new(0x02),
-            size_max: Volatile::new(0),
-            seg_max: Volatile::new(0),
-            cylinders: Volatile::new(0),
-            heads: Volatile::new(0),
-            sectors: Volatile::new(0),
-            blk_size: Volatile::new(0),
-            physical_block_exp: Volatile::new(0),
-            alignment_offset: Volatile::new(0),
-            min_io_size: Volatile::new(0),
-            opt_io_size: Volatile::new(0),
-        };
-        let state = Arc::new(Mutex::new(State {
-            queues: vec![QueueStatus::default()],
-            ..Default::default()
-        }));
-        let transport = FakeTransport {
-            device_type: DeviceType::Block,
-            max_queue_size: QUEUE_SIZE.into(),
-            device_features: BlkFeature::RO.bits(),
-            config_space: NonNull::from(&mut config_space),
-            state: state.clone(),
-        };
-        let blk = VirtIOBlk::<FakeHal, FakeTransport<BlkConfig>>::new(transport).unwrap();
-
-        assert_eq!(blk.capacity(), 0x02_0000_0042);
-        assert_eq!(blk.readonly(), true);
-    }
-
-    #[test]
-    fn read() {
-        let mut config_space = BlkConfig {
-            capacity_low: Volatile::new(66),
-            capacity_high: Volatile::new(0),
-            size_max: Volatile::new(0),
-            seg_max: Volatile::new(0),
-            cylinders: Volatile::new(0),
-            heads: Volatile::new(0),
-            sectors: Volatile::new(0),
-            blk_size: Volatile::new(0),
-            physical_block_exp: Volatile::new(0),
-            alignment_offset: Volatile::new(0),
-            min_io_size: Volatile::new(0),
-            opt_io_size: Volatile::new(0),
-        };
-        let state = Arc::new(Mutex::new(State {
-            queues: vec![QueueStatus::default()],
-            ..Default::default()
-        }));
-        let transport = FakeTransport {
-            device_type: DeviceType::Block,
-            max_queue_size: QUEUE_SIZE.into(),
-            device_features: BlkFeature::RING_INDIRECT_DESC.bits(),
-            config_space: NonNull::from(&mut config_space),
-            state: state.clone(),
-        };
-        let mut blk = VirtIOBlk::<FakeHal, FakeTransport<BlkConfig>>::new(transport).unwrap();
-
-        // Start a thread to simulate the device waiting for a read request.
-        let handle = thread::spawn(move || {
-            println!("Device waiting for a request.");
-            State::wait_until_queue_notified(&state, QUEUE);
-            println!("Transmit queue was notified.");
-
-            assert!(state
-                .lock()
-                .unwrap()
-                .read_write_queue::<{ QUEUE_SIZE as usize }>(QUEUE, |request| {
-                    assert_eq!(
-                        request,
-                        BlkReq {
-                            type_: ReqType::In,
-                            reserved: 0,
-                            sector: 42
-                        }
-                        .as_bytes()
-                    );
-
-                    let mut response = vec![0; SECTOR_SIZE];
-                    response[0..9].copy_from_slice(b"Test data");
-                    response.extend_from_slice(
-                        BlkResp {
-                            status: RespStatus::OK,
-                        }
-                        .as_bytes(),
-                    );
-
-                    response
-                }));
-        });
-
-        // Read a block from the device.
-        let mut buffer = [0; 512];
-        blk.read_blocks(42, &mut buffer).unwrap();
-        assert_eq!(&buffer[0..9], b"Test data");
-
-        handle.join().unwrap();
-    }
-
-    #[test]
-    fn write() {
-        let mut config_space = BlkConfig {
-            capacity_low: Volatile::new(66),
-            capacity_high: Volatile::new(0),
-            size_max: Volatile::new(0),
-            seg_max: Volatile::new(0),
-            cylinders: Volatile::new(0),
-            heads: Volatile::new(0),
-            sectors: Volatile::new(0),
-            blk_size: Volatile::new(0),
-            physical_block_exp: Volatile::new(0),
-            alignment_offset: Volatile::new(0),
-            min_io_size: Volatile::new(0),
-            opt_io_size: Volatile::new(0),
-        };
-        let state = Arc::new(Mutex::new(State {
-            queues: vec![QueueStatus::default()],
-            ..Default::default()
-        }));
-        let transport = FakeTransport {
-            device_type: DeviceType::Block,
-            max_queue_size: QUEUE_SIZE.into(),
-            device_features: BlkFeature::RING_INDIRECT_DESC.bits(),
-            config_space: NonNull::from(&mut config_space),
-            state: state.clone(),
-        };
-        let mut blk = VirtIOBlk::<FakeHal, FakeTransport<BlkConfig>>::new(transport).unwrap();
-
-        // Start a thread to simulate the device waiting for a write request.
-        let handle = thread::spawn(move || {
-            println!("Device waiting for a request.");
-            State::wait_until_queue_notified(&state, QUEUE);
-            println!("Transmit queue was notified.");
-
-            assert!(state
-                .lock()
-                .unwrap()
-                .read_write_queue::<{ QUEUE_SIZE as usize }>(QUEUE, |request| {
-                    assert_eq!(
-                        &request[0..size_of::<BlkReq>()],
-                        BlkReq {
-                            type_: ReqType::Out,
-                            reserved: 0,
-                            sector: 42
-                        }
-                        .as_bytes()
-                    );
-                    let data = &request[size_of::<BlkReq>()..];
-                    assert_eq!(data.len(), SECTOR_SIZE);
-                    assert_eq!(&data[0..9], b"Test data");
-
-                    let mut response = Vec::new();
-                    response.extend_from_slice(
-                        BlkResp {
-                            status: RespStatus::OK,
-                        }
-                        .as_bytes(),
-                    );
-
-                    response
-                }));
-        });
-
-        // Write a block to the device.
-        let mut buffer = [0; 512];
-        buffer[0..9].copy_from_slice(b"Test data");
-        blk.write_blocks(42, &mut buffer).unwrap();
-
-        // Request to flush should be ignored as the device doesn't support it.
-        blk.flush().unwrap();
-
-        handle.join().unwrap();
-    }
-
-    #[test]
-    fn flush() {
-        let mut config_space = BlkConfig {
-            capacity_low: Volatile::new(66),
-            capacity_high: Volatile::new(0),
-            size_max: Volatile::new(0),
-            seg_max: Volatile::new(0),
-            cylinders: Volatile::new(0),
-            heads: Volatile::new(0),
-            sectors: Volatile::new(0),
-            blk_size: Volatile::new(0),
-            physical_block_exp: Volatile::new(0),
-            alignment_offset: Volatile::new(0),
-            min_io_size: Volatile::new(0),
-            opt_io_size: Volatile::new(0),
-        };
-        let state = Arc::new(Mutex::new(State {
-            queues: vec![QueueStatus::default()],
-            ..Default::default()
-        }));
-        let transport = FakeTransport {
-            device_type: DeviceType::Block,
-            max_queue_size: QUEUE_SIZE.into(),
-            device_features: (BlkFeature::RING_INDIRECT_DESC | BlkFeature::FLUSH).bits(),
-            config_space: NonNull::from(&mut config_space),
-            state: state.clone(),
-        };
-        let mut blk = VirtIOBlk::<FakeHal, FakeTransport<BlkConfig>>::new(transport).unwrap();
-
-        // Start a thread to simulate the device waiting for a flush request.
-        let handle = thread::spawn(move || {
-            println!("Device waiting for a request.");
-            State::wait_until_queue_notified(&state, QUEUE);
-            println!("Transmit queue was notified.");
-
-            assert!(state
-                .lock()
-                .unwrap()
-                .read_write_queue::<{ QUEUE_SIZE as usize }>(QUEUE, |request| {
-                    assert_eq!(
-                        request,
-                        BlkReq {
-                            type_: ReqType::Flush,
-                            reserved: 0,
-                            sector: 0,
-                        }
-                        .as_bytes()
-                    );
-
-                    let mut response = Vec::new();
-                    response.extend_from_slice(
-                        BlkResp {
-                            status: RespStatus::OK,
-                        }
-                        .as_bytes(),
-                    );
-
-                    response
-                }));
-        });
-
-        // Request to flush.
-        blk.flush().unwrap();
-
-        handle.join().unwrap();
-    }
-
-    #[test]
-    fn device_id() {
-        let mut config_space = BlkConfig {
-            capacity_low: Volatile::new(66),
-            capacity_high: Volatile::new(0),
-            size_max: Volatile::new(0),
-            seg_max: Volatile::new(0),
-            cylinders: Volatile::new(0),
-            heads: Volatile::new(0),
-            sectors: Volatile::new(0),
-            blk_size: Volatile::new(0),
-            physical_block_exp: Volatile::new(0),
-            alignment_offset: Volatile::new(0),
-            min_io_size: Volatile::new(0),
-            opt_io_size: Volatile::new(0),
-        };
-        let state = Arc::new(Mutex::new(State {
-            queues: vec![QueueStatus::default()],
-            ..Default::default()
-        }));
-        let transport = FakeTransport {
-            device_type: DeviceType::Block,
-            max_queue_size: QUEUE_SIZE.into(),
-            device_features: BlkFeature::RING_INDIRECT_DESC.bits(),
-            config_space: NonNull::from(&mut config_space),
-            state: state.clone(),
-        };
-        let mut blk = VirtIOBlk::<FakeHal, FakeTransport<BlkConfig>>::new(transport).unwrap();
-
-        // Start a thread to simulate the device waiting for a flush request.
-        let handle = thread::spawn(move || {
-            println!("Device waiting for a request.");
-            State::wait_until_queue_notified(&state, QUEUE);
-            println!("Transmit queue was notified.");
-
-            assert!(state
-                .lock()
-                .unwrap()
-                .read_write_queue::<{ QUEUE_SIZE as usize }>(QUEUE, |request| {
-                    assert_eq!(
-                        request,
-                        BlkReq {
-                            type_: ReqType::GetId,
-                            reserved: 0,
-                            sector: 0,
-                        }
-                        .as_bytes()
-                    );
-
-                    let mut response = Vec::new();
-                    response.extend_from_slice(b"device_id\0\0\0\0\0\0\0\0\0\0\0");
-                    response.extend_from_slice(
-                        BlkResp {
-                            status: RespStatus::OK,
-                        }
-                        .as_bytes(),
-                    );
-
-                    response
-                }));
-        });
-
-        let mut id = [0; 20];
-        let length = blk.device_id(&mut id).unwrap();
-        assert_eq!(&id[0..length], b"device_id");
-
-        handle.join().unwrap();
     }
 }

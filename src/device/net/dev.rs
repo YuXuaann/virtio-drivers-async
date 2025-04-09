@@ -119,7 +119,7 @@ impl<H: Hal, T: Transport, const QUEUE_SIZE: usize> VirtIONet<H, T, QUEUE_SIZE> 
 
     /// Sends a [`TxBuffer`] to the network, and blocks until the request
     /// completed.
-    pub fn send(&mut self, tx_buf: TxBuffer) -> Result {
-        self.inner.send(tx_buf.packet())
+    pub async fn send(&mut self, tx_buf: TxBuffer) -> Result {
+        self.inner.send(tx_buf.packet()).await
     }
 }

@@ -12,7 +12,6 @@ use bitflags::bitflags;
 #[cfg(test)]
 use core::cmp::min;
 use core::convert::TryInto;
-use core::hint::spin_loop;
 use core::mem::{size_of, take};
 #[cfg(test)]
 use core::ptr;
@@ -296,7 +295,7 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
     /// This assumes that the device isn't processing any other buffers at the same time.
     ///
     /// The buffers must not be empty.
-    pub fn add_notify_wait_pop<'a>(
+    pub async fn add_notify_wait_pop<'a>(
         &mut self,
         inputs: &'a [&'a [u8]],
         outputs: &'a mut [&'a mut [u8]],
@@ -312,8 +311,11 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
         }
 
         // Wait until there is at least one element in the used ring.
-        while !self.can_pop() {
-            spin_loop();
+        loop {
+            if self.can_pop() {
+                break;
+            }
+            futures_lite::future::yield_now().await;
         }
 
         // Safe because these are the same buffers as we passed to `add` above and they are still

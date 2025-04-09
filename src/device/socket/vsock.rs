@@ -301,37 +301,38 @@ impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize> VirtIOSocket<H, T, RX_BU
     /// This returns as soon as the request is sent; you should wait until `poll` returns a
     /// `VsockEventType::Connected` event indicating that the peer has accepted the connection
     /// before sending data.
-    pub fn connect(&mut self, connection_info: &ConnectionInfo) -> Result {
+    pub async fn connect(&mut self, connection_info: &ConnectionInfo) -> Result {
         let header = VirtioVsockHdr {
             op: VirtioVsockOp::Request.into(),
             ..connection_info.new_header(self.guest_cid)
         };
         // Sends a header only packet to the TX queue to connect the device to the listening socket
         // at the given destination.
-        self.send_packet_to_tx_queue(&header, &[])
+        self.send_packet_to_tx_queue(&header, &[]).await
     }
 
     /// Accepts the given connection from a peer.
-    pub fn accept(&mut self, connection_info: &ConnectionInfo) -> Result {
+    pub async fn accept(&mut self, connection_info: &ConnectionInfo) -> Result {
         let header = VirtioVsockHdr {
             op: VirtioVsockOp::Response.into(),
             ..connection_info.new_header(self.guest_cid)
         };
-        self.send_packet_to_tx_queue(&header, &[])
+        self.send_packet_to_tx_queue(&header, &[]).await
     }
 
     /// Requests the peer to send us a credit update for the given connection.
-    fn request_credit(&mut self, connection_info: &ConnectionInfo) -> Result {
+    async fn request_credit(&mut self, connection_info: &ConnectionInfo) -> Result {
         let header = VirtioVsockHdr {
             op: VirtioVsockOp::CreditRequest.into(),
             ..connection_info.new_header(self.guest_cid)
         };
-        self.send_packet_to_tx_queue(&header, &[])
+        self.send_packet_to_tx_queue(&header, &[]).await
     }
 
     /// Sends the buffer to the destination.
-    pub fn send(&mut self, buffer: &[u8], connection_info: &mut ConnectionInfo) -> Result {
-        self.check_peer_buffer_is_sufficient(connection_info, buffer.len())?;
+    pub async fn send(&mut self, buffer: &[u8], connection_info: &mut ConnectionInfo) -> Result {
+        self.check_peer_buffer_is_sufficient(connection_info, buffer.len())
+            .await?;
 
         let len = buffer.len() as u32;
         let header = VirtioVsockHdr {
@@ -340,10 +341,10 @@ impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize> VirtIOSocket<H, T, RX_BU
             ..connection_info.new_header(self.guest_cid)
         };
         connection_info.tx_cnt += len;
-        self.send_packet_to_tx_queue(&header, buffer)
+        self.send_packet_to_tx_queue(&header, buffer).await
     }
 
-    fn check_peer_buffer_is_sufficient(
+    async fn check_peer_buffer_is_sufficient(
         &mut self,
         connection_info: &mut ConnectionInfo,
         buffer_len: usize,
@@ -354,7 +355,7 @@ impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize> VirtIOSocket<H, T, RX_BU
             // Request an update of the cached peer credit, if we haven't already done so, and tell
             // the caller to try again later.
             if !connection_info.has_pending_credit_request {
-                self.request_credit(connection_info)?;
+                self.request_credit(connection_info).await?;
                 connection_info.has_pending_credit_request = true;
             }
             Err(SocketError::InsufficientBufferSpaceInPeer.into())
@@ -362,12 +363,12 @@ impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize> VirtIOSocket<H, T, RX_BU
     }
 
     /// Tells the peer how much buffer space we have to receive data.
-    pub fn credit_update(&mut self, connection_info: &ConnectionInfo) -> Result {
+    pub async fn credit_update(&mut self, connection_info: &ConnectionInfo) -> Result {
         let header = VirtioVsockHdr {
             op: VirtioVsockOp::CreditUpdate.into(),
             ..connection_info.new_header(self.guest_cid)
         };
-        self.send_packet_to_tx_queue(&header, &[])
+        self.send_packet_to_tx_queue(&header, &[]).await
     }
 
     /// Polls the RX virtqueue for the next event, and calls the given handler function to handle
@@ -388,7 +389,7 @@ impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize> VirtIOSocket<H, T, RX_BU
     /// This returns as soon as the request is sent; you should wait until `poll` returns a
     /// `VsockEventType::Disconnected` event if you want to know that the peer has acknowledged the
     /// shutdown.
-    pub fn shutdown_with_hints(
+    pub async fn shutdown_with_hints(
         &mut self,
         connection_info: &ConnectionInfo,
         hints: StreamShutdown,
@@ -398,7 +399,7 @@ impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize> VirtIOSocket<H, T, RX_BU
             flags: hints.into(),
             ..connection_info.new_header(self.guest_cid)
         };
-        self.send_packet_to_tx_queue(&header, &[])
+        self.send_packet_to_tx_queue(&header, &[]).await
     }
 
     /// Requests to shut down the connection cleanly, telling the peer that we won't send or receive
@@ -407,33 +408,33 @@ impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize> VirtIOSocket<H, T, RX_BU
     /// This returns as soon as the request is sent; you should wait until `poll` returns a
     /// `VsockEventType::Disconnected` event if you want to know that the peer has acknowledged the
     /// shutdown.
-    pub fn shutdown(&mut self, connection_info: &ConnectionInfo) -> Result {
+    pub async fn shutdown(&mut self, connection_info: &ConnectionInfo) -> Result {
         self.shutdown_with_hints(
             connection_info,
             StreamShutdown::SEND | StreamShutdown::RECEIVE,
         )
+        .await
     }
 
     /// Forcibly closes the connection without waiting for the peer.
-    pub fn force_close(&mut self, connection_info: &ConnectionInfo) -> Result {
+    pub async fn force_close(&mut self, connection_info: &ConnectionInfo) -> Result {
         let header = VirtioVsockHdr {
             op: VirtioVsockOp::Rst.into(),
             ..connection_info.new_header(self.guest_cid)
         };
-        self.send_packet_to_tx_queue(&header, &[])?;
+        self.send_packet_to_tx_queue(&header, &[]).await?;
         Ok(())
     }
 
-    fn send_packet_to_tx_queue(&mut self, header: &VirtioVsockHdr, buffer: &[u8]) -> Result {
+    async fn send_packet_to_tx_queue(&mut self, header: &VirtioVsockHdr, buffer: &[u8]) -> Result {
         let _len = if buffer.is_empty() {
             self.tx
-                .add_notify_wait_pop(&[header.as_bytes()], &mut [], &mut self.transport)?
+                .add_notify_wait_pop(&[header.as_bytes()], &mut [], &mut self.transport)
+                .await?
         } else {
-            self.tx.add_notify_wait_pop(
-                &[header.as_bytes(), buffer],
-                &mut [],
-                &mut self.transport,
-            )?
+            self.tx
+                .add_notify_wait_pop(&[header.as_bytes(), buffer], &mut [], &mut self.transport)
+                .await?
         };
         Ok(())
     }

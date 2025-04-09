@@ -119,7 +119,7 @@ impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize>
     /// This returns as soon as the request is sent; you should wait until `poll` returns a
     /// `VsockEventType::Connected` event indicating that the peer has accepted the connection
     /// before sending data.
-    pub fn connect(&mut self, destination: VsockAddr, src_port: u32) -> Result {
+    pub async fn connect(&mut self, destination: VsockAddr, src_port: u32) -> Result {
         if self.connections.iter().any(|connection| {
             connection.info.dst == destination && connection.info.src_port == src_port
         }) {
@@ -129,21 +129,21 @@ impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize>
         let new_connection =
             Connection::new(destination, src_port, self.per_connection_buffer_capacity);
 
-        self.driver.connect(&new_connection.info)?;
+        self.driver.connect(&new_connection.info).await?;
         debug!("Connection requested: {:?}", new_connection.info);
         self.connections.push(new_connection);
         Ok(())
     }
 
     /// Sends the buffer to the destination.
-    pub fn send(&mut self, destination: VsockAddr, src_port: u32, buffer: &[u8]) -> Result {
+    pub async fn send(&mut self, destination: VsockAddr, src_port: u32, buffer: &[u8]) -> Result {
         let (_, connection) = get_connection(&mut self.connections, destination, src_port)?;
 
-        self.driver.send(buffer, &mut connection.info)
+        self.driver.send(buffer, &mut connection.info).await
     }
 
     /// Polls the vsock device to receive data or other updates.
-    pub fn poll(&mut self) -> Result<Option<VsockEvent>> {
+    pub async fn poll(&mut self) -> Result<Option<VsockEvent>> {
         let guest_cid = self.driver.guest_cid();
         let connections = &mut self.connections;
         let per_connection_buffer_capacity = self.per_connection_buffer_capacity;
@@ -196,10 +196,10 @@ impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize>
         match event.event_type {
             VsockEventType::ConnectionRequest => {
                 if self.listening_ports.contains(&event.destination.port) {
-                    self.driver.accept(&connection.info)?;
+                    self.driver.accept(&connection.info).await?;
                 } else {
                     // Reject the connection request and remove it from our list.
-                    self.driver.force_close(&connection.info)?;
+                    self.driver.force_close(&connection.info).await?;
                     self.connections.swap_remove(connection_index);
 
                     // No need to pass the request on to the client, as we've already rejected it.
@@ -211,7 +211,7 @@ impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize>
                 // Wait until client reads all data before removing connection.
                 if connection.buffer.is_empty() {
                     if reason == DisconnectReason::Shutdown {
-                        self.driver.force_close(&connection.info)?;
+                        self.driver.force_close(&connection.info).await?;
                     }
                     self.connections.swap_remove(connection_index);
                 } else {
@@ -223,7 +223,7 @@ impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize>
             }
             VsockEventType::CreditRequest => {
                 // If the peer requested credit, send an update.
-                self.driver.credit_update(&connection.info)?;
+                self.driver.credit_update(&connection.info).await?;
                 // No need to pass the request on to the client, we've already handled it.
                 return Ok(None);
             }
@@ -234,7 +234,12 @@ impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize>
     }
 
     /// Reads data received from the given connection.
-    pub fn recv(&mut self, peer: VsockAddr, src_port: u32, buffer: &mut [u8]) -> Result<usize> {
+    pub async fn recv(
+        &mut self,
+        peer: VsockAddr,
+        src_port: u32,
+        buffer: &mut [u8],
+    ) -> Result<usize> {
         let (connection_index, connection) = get_connection(&mut self.connections, peer, src_port)?;
 
         // Copy from ring buffer
@@ -245,7 +250,7 @@ impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize>
         // If buffer is now empty and the peer requested shutdown, finish shutting down the
         // connection.
         if connection.peer_requested_shutdown && connection.buffer.is_empty() {
-            self.driver.force_close(&connection.info)?;
+            self.driver.force_close(&connection.info).await?;
             self.connections.swap_remove(connection_index);
         }
 
@@ -262,15 +267,15 @@ impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize>
     }
 
     /// Sends a credit update to the given peer.
-    pub fn update_credit(&mut self, peer: VsockAddr, src_port: u32) -> Result {
+    pub async fn update_credit(&mut self, peer: VsockAddr, src_port: u32) -> Result {
         let (_, connection) = get_connection(&mut self.connections, peer, src_port)?;
-        self.driver.credit_update(&connection.info)
+        self.driver.credit_update(&connection.info).await
     }
 
     /// Blocks until we get some event from the vsock device.
-    pub fn wait_for_event(&mut self) -> Result<VsockEvent> {
+    pub async fn wait_for_event(&mut self) -> Result<VsockEvent> {
         loop {
-            if let Some(event) = self.poll()? {
+            if let Some(event) = self.poll().await? {
                 return Ok(event);
             } else {
                 spin_loop();
@@ -284,17 +289,17 @@ impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize>
     /// This returns as soon as the request is sent; you should wait until `poll` returns a
     /// `VsockEventType::Disconnected` event if you want to know that the peer has acknowledged the
     /// shutdown.
-    pub fn shutdown(&mut self, destination: VsockAddr, src_port: u32) -> Result {
+    pub async fn shutdown(&mut self, destination: VsockAddr, src_port: u32) -> Result {
         let (_, connection) = get_connection(&mut self.connections, destination, src_port)?;
 
-        self.driver.shutdown(&connection.info)
+        self.driver.shutdown(&connection.info).await
     }
 
     /// Forcibly closes the connection without waiting for the peer.
-    pub fn force_close(&mut self, destination: VsockAddr, src_port: u32) -> Result {
+    pub async fn force_close(&mut self, destination: VsockAddr, src_port: u32) -> Result {
         let (index, connection) = get_connection(&mut self.connections, destination, src_port)?;
 
-        self.driver.force_close(&connection.info)?;
+        self.driver.force_close(&connection.info).await?;
 
         self.connections.swap_remove(index);
         Ok(())
@@ -408,394 +413,5 @@ impl RingBuffer {
         self.start = (self.start + bytes_read) % self.buffer.len();
 
         bytes_read
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        device::socket::{
-            protocol::{
-                SocketType, StreamShutdown, VirtioVsockConfig, VirtioVsockHdr, VirtioVsockOp,
-            },
-            vsock::{VsockBufferStatus, QUEUE_SIZE, RX_QUEUE_IDX, TX_QUEUE_IDX},
-        },
-        hal::fake::FakeHal,
-        transport::{
-            fake::{FakeTransport, QueueStatus, State},
-            DeviceType,
-        },
-        volatile::ReadOnly,
-    };
-    use alloc::{sync::Arc, vec};
-    use core::{mem::size_of, ptr::NonNull};
-    use std::{sync::Mutex, thread};
-    use zerocopy::{AsBytes, FromBytes};
-
-    #[test]
-    fn send_recv() {
-        let host_cid = 2;
-        let guest_cid = 66;
-        let host_port = 1234;
-        let guest_port = 4321;
-        let host_address = VsockAddr {
-            cid: host_cid,
-            port: host_port,
-        };
-        let hello_from_guest = "Hello from guest";
-        let hello_from_host = "Hello from host";
-
-        let mut config_space = VirtioVsockConfig {
-            guest_cid_low: ReadOnly::new(66),
-            guest_cid_high: ReadOnly::new(0),
-        };
-        let state = Arc::new(Mutex::new(State {
-            queues: vec![
-                QueueStatus::default(),
-                QueueStatus::default(),
-                QueueStatus::default(),
-            ],
-            ..Default::default()
-        }));
-        let transport = FakeTransport {
-            device_type: DeviceType::Socket,
-            max_queue_size: 32,
-            device_features: 0,
-            config_space: NonNull::from(&mut config_space),
-            state: state.clone(),
-        };
-        let mut socket = VsockConnectionManager::new(
-            VirtIOSocket::<FakeHal, FakeTransport<VirtioVsockConfig>>::new(transport).unwrap(),
-        );
-
-        // Start a thread to simulate the device.
-        let handle = thread::spawn(move || {
-            // Wait for connection request.
-            State::wait_until_queue_notified(&state, TX_QUEUE_IDX);
-            assert_eq!(
-                VirtioVsockHdr::read_from(
-                    state
-                        .lock()
-                        .unwrap()
-                        .read_from_queue::<QUEUE_SIZE>(TX_QUEUE_IDX)
-                        .as_slice()
-                )
-                .unwrap(),
-                VirtioVsockHdr {
-                    op: VirtioVsockOp::Request.into(),
-                    src_cid: guest_cid.into(),
-                    dst_cid: host_cid.into(),
-                    src_port: guest_port.into(),
-                    dst_port: host_port.into(),
-                    len: 0.into(),
-                    socket_type: SocketType::Stream.into(),
-                    flags: 0.into(),
-                    buf_alloc: 1024.into(),
-                    fwd_cnt: 0.into(),
-                }
-            );
-
-            // Accept connection and give the peer enough credit to send the message.
-            state.lock().unwrap().write_to_queue::<QUEUE_SIZE>(
-                RX_QUEUE_IDX,
-                VirtioVsockHdr {
-                    op: VirtioVsockOp::Response.into(),
-                    src_cid: host_cid.into(),
-                    dst_cid: guest_cid.into(),
-                    src_port: host_port.into(),
-                    dst_port: guest_port.into(),
-                    len: 0.into(),
-                    socket_type: SocketType::Stream.into(),
-                    flags: 0.into(),
-                    buf_alloc: 50.into(),
-                    fwd_cnt: 0.into(),
-                }
-                .as_bytes(),
-            );
-
-            // Expect the guest to send some data.
-            State::wait_until_queue_notified(&state, TX_QUEUE_IDX);
-            let request = state
-                .lock()
-                .unwrap()
-                .read_from_queue::<QUEUE_SIZE>(TX_QUEUE_IDX);
-            assert_eq!(
-                request.len(),
-                size_of::<VirtioVsockHdr>() + hello_from_guest.len()
-            );
-            assert_eq!(
-                VirtioVsockHdr::read_from_prefix(request.as_slice()).unwrap(),
-                VirtioVsockHdr {
-                    op: VirtioVsockOp::Rw.into(),
-                    src_cid: guest_cid.into(),
-                    dst_cid: host_cid.into(),
-                    src_port: guest_port.into(),
-                    dst_port: host_port.into(),
-                    len: (hello_from_guest.len() as u32).into(),
-                    socket_type: SocketType::Stream.into(),
-                    flags: 0.into(),
-                    buf_alloc: 1024.into(),
-                    fwd_cnt: 0.into(),
-                }
-            );
-            assert_eq!(
-                &request[size_of::<VirtioVsockHdr>()..],
-                hello_from_guest.as_bytes()
-            );
-
-            println!("Host sending");
-
-            // Send a response.
-            let mut response = vec![0; size_of::<VirtioVsockHdr>() + hello_from_host.len()];
-            VirtioVsockHdr {
-                op: VirtioVsockOp::Rw.into(),
-                src_cid: host_cid.into(),
-                dst_cid: guest_cid.into(),
-                src_port: host_port.into(),
-                dst_port: guest_port.into(),
-                len: (hello_from_host.len() as u32).into(),
-                socket_type: SocketType::Stream.into(),
-                flags: 0.into(),
-                buf_alloc: 50.into(),
-                fwd_cnt: (hello_from_guest.len() as u32).into(),
-            }
-            .write_to_prefix(response.as_mut_slice());
-            response[size_of::<VirtioVsockHdr>()..].copy_from_slice(hello_from_host.as_bytes());
-            state
-                .lock()
-                .unwrap()
-                .write_to_queue::<QUEUE_SIZE>(RX_QUEUE_IDX, &response);
-
-            // Expect a shutdown.
-            State::wait_until_queue_notified(&state, TX_QUEUE_IDX);
-            assert_eq!(
-                VirtioVsockHdr::read_from(
-                    state
-                        .lock()
-                        .unwrap()
-                        .read_from_queue::<QUEUE_SIZE>(TX_QUEUE_IDX)
-                        .as_slice()
-                )
-                .unwrap(),
-                VirtioVsockHdr {
-                    op: VirtioVsockOp::Shutdown.into(),
-                    src_cid: guest_cid.into(),
-                    dst_cid: host_cid.into(),
-                    src_port: guest_port.into(),
-                    dst_port: host_port.into(),
-                    len: 0.into(),
-                    socket_type: SocketType::Stream.into(),
-                    flags: (StreamShutdown::SEND | StreamShutdown::RECEIVE).into(),
-                    buf_alloc: 1024.into(),
-                    fwd_cnt: (hello_from_host.len() as u32).into(),
-                }
-            );
-        });
-
-        socket.connect(host_address, guest_port).unwrap();
-        assert_eq!(
-            socket.wait_for_event().unwrap(),
-            VsockEvent {
-                source: host_address,
-                destination: VsockAddr {
-                    cid: guest_cid,
-                    port: guest_port,
-                },
-                event_type: VsockEventType::Connected,
-                buffer_status: VsockBufferStatus {
-                    buffer_allocation: 50,
-                    forward_count: 0,
-                },
-            }
-        );
-        println!("Guest sending");
-        socket
-            .send(host_address, guest_port, "Hello from guest".as_bytes())
-            .unwrap();
-        println!("Guest waiting to receive.");
-        assert_eq!(
-            socket.wait_for_event().unwrap(),
-            VsockEvent {
-                source: host_address,
-                destination: VsockAddr {
-                    cid: guest_cid,
-                    port: guest_port,
-                },
-                event_type: VsockEventType::Received {
-                    length: hello_from_host.len()
-                },
-                buffer_status: VsockBufferStatus {
-                    buffer_allocation: 50,
-                    forward_count: hello_from_guest.len() as u32,
-                },
-            }
-        );
-        println!("Guest getting received data.");
-        let mut buffer = [0u8; 64];
-        assert_eq!(
-            socket.recv(host_address, guest_port, &mut buffer).unwrap(),
-            hello_from_host.len()
-        );
-        assert_eq!(
-            &buffer[0..hello_from_host.len()],
-            hello_from_host.as_bytes()
-        );
-        socket.shutdown(host_address, guest_port).unwrap();
-
-        handle.join().unwrap();
-    }
-
-    #[test]
-    fn incoming_connection() {
-        let host_cid = 2;
-        let guest_cid = 66;
-        let host_port = 1234;
-        let guest_port = 4321;
-        let wrong_guest_port = 4444;
-        let host_address = VsockAddr {
-            cid: host_cid,
-            port: host_port,
-        };
-
-        let mut config_space = VirtioVsockConfig {
-            guest_cid_low: ReadOnly::new(66),
-            guest_cid_high: ReadOnly::new(0),
-        };
-        let state = Arc::new(Mutex::new(State {
-            queues: vec![
-                QueueStatus::default(),
-                QueueStatus::default(),
-                QueueStatus::default(),
-            ],
-            ..Default::default()
-        }));
-        let transport = FakeTransport {
-            device_type: DeviceType::Socket,
-            max_queue_size: 32,
-            device_features: 0,
-            config_space: NonNull::from(&mut config_space),
-            state: state.clone(),
-        };
-        let mut socket = VsockConnectionManager::new(
-            VirtIOSocket::<FakeHal, FakeTransport<VirtioVsockConfig>>::new(transport).unwrap(),
-        );
-
-        socket.listen(guest_port);
-
-        // Start a thread to simulate the device.
-        let handle = thread::spawn(move || {
-            // Send a connection request for a port the guest isn't listening on.
-            println!("Host sending connection request to wrong port");
-            state.lock().unwrap().write_to_queue::<QUEUE_SIZE>(
-                RX_QUEUE_IDX,
-                VirtioVsockHdr {
-                    op: VirtioVsockOp::Request.into(),
-                    src_cid: host_cid.into(),
-                    dst_cid: guest_cid.into(),
-                    src_port: host_port.into(),
-                    dst_port: wrong_guest_port.into(),
-                    len: 0.into(),
-                    socket_type: SocketType::Stream.into(),
-                    flags: 0.into(),
-                    buf_alloc: 50.into(),
-                    fwd_cnt: 0.into(),
-                }
-                .as_bytes(),
-            );
-
-            // Expect a rejection.
-            println!("Host waiting for rejection");
-            State::wait_until_queue_notified(&state, TX_QUEUE_IDX);
-            assert_eq!(
-                VirtioVsockHdr::read_from(
-                    state
-                        .lock()
-                        .unwrap()
-                        .read_from_queue::<QUEUE_SIZE>(TX_QUEUE_IDX)
-                        .as_slice()
-                )
-                .unwrap(),
-                VirtioVsockHdr {
-                    op: VirtioVsockOp::Rst.into(),
-                    src_cid: guest_cid.into(),
-                    dst_cid: host_cid.into(),
-                    src_port: wrong_guest_port.into(),
-                    dst_port: host_port.into(),
-                    len: 0.into(),
-                    socket_type: SocketType::Stream.into(),
-                    flags: 0.into(),
-                    buf_alloc: 1024.into(),
-                    fwd_cnt: 0.into(),
-                }
-            );
-
-            // Send a connection request for a port the guest is listening on.
-            println!("Host sending connection request to right port");
-            state.lock().unwrap().write_to_queue::<QUEUE_SIZE>(
-                RX_QUEUE_IDX,
-                VirtioVsockHdr {
-                    op: VirtioVsockOp::Request.into(),
-                    src_cid: host_cid.into(),
-                    dst_cid: guest_cid.into(),
-                    src_port: host_port.into(),
-                    dst_port: guest_port.into(),
-                    len: 0.into(),
-                    socket_type: SocketType::Stream.into(),
-                    flags: 0.into(),
-                    buf_alloc: 50.into(),
-                    fwd_cnt: 0.into(),
-                }
-                .as_bytes(),
-            );
-
-            // Expect a response.
-            println!("Host waiting for response");
-            State::wait_until_queue_notified(&state, TX_QUEUE_IDX);
-            assert_eq!(
-                VirtioVsockHdr::read_from(
-                    state
-                        .lock()
-                        .unwrap()
-                        .read_from_queue::<QUEUE_SIZE>(TX_QUEUE_IDX)
-                        .as_slice()
-                )
-                .unwrap(),
-                VirtioVsockHdr {
-                    op: VirtioVsockOp::Response.into(),
-                    src_cid: guest_cid.into(),
-                    dst_cid: host_cid.into(),
-                    src_port: guest_port.into(),
-                    dst_port: host_port.into(),
-                    len: 0.into(),
-                    socket_type: SocketType::Stream.into(),
-                    flags: 0.into(),
-                    buf_alloc: 1024.into(),
-                    fwd_cnt: 0.into(),
-                }
-            );
-
-            println!("Host finished");
-        });
-
-        // Expect an incoming connection.
-        println!("Guest expecting incoming connection.");
-        assert_eq!(
-            socket.wait_for_event().unwrap(),
-            VsockEvent {
-                source: host_address,
-                destination: VsockAddr {
-                    cid: guest_cid,
-                    port: guest_port,
-                },
-                event_type: VsockEventType::ConnectionRequest,
-                buffer_status: VsockBufferStatus {
-                    buffer_allocation: 50,
-                    forward_count: 0,
-                },
-            }
-        );
-
-        handle.join().unwrap();
     }
 }

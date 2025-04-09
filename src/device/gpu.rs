@@ -89,15 +89,15 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
     }
 
     /// Get the resolution (width, height).
-    pub fn resolution(&mut self) -> Result<(u32, u32)> {
-        let display_info = self.get_display_info()?;
+    pub async fn resolution(&mut self) -> Result<(u32, u32)> {
+        let display_info = self.get_display_info().await?;
         Ok((display_info.rect.width, display_info.rect.height))
     }
 
     /// Setup framebuffer
-    pub fn setup_framebuffer(&mut self) -> Result<&mut [u8]> {
+    pub async fn setup_framebuffer(&mut self) -> Result<&mut [u8]> {
         // get display info
-        let display_info = self.get_display_info()?;
+        let display_info = self.get_display_info().await?;
         info!("=> {:?}", display_info);
         self.rect = Some(display_info.rect);
 
@@ -106,17 +106,20 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
             RESOURCE_ID_FB,
             display_info.rect.width,
             display_info.rect.height,
-        )?;
+        )
+        .await?;
 
         // alloc continuous pages for the frame buffer
         let size = display_info.rect.width * display_info.rect.height * 4;
         let frame_buffer_dma = Dma::new(pages(size as usize), BufferDirection::DriverToDevice)?;
 
         // resource_attach_backing
-        self.resource_attach_backing(RESOURCE_ID_FB, frame_buffer_dma.paddr() as u64, size)?;
+        self.resource_attach_backing(RESOURCE_ID_FB, frame_buffer_dma.paddr() as u64, size)
+            .await?;
 
         // map frame buffer to screen
-        self.set_scanout(display_info.rect, SCANOUT_ID, RESOURCE_ID_FB)?;
+        self.set_scanout(display_info.rect, SCANOUT_ID, RESOURCE_ID_FB)
+            .await?;
 
         let buf = unsafe { frame_buffer_dma.raw_slice().as_mut() };
         self.frame_buffer_dma = Some(frame_buffer_dma);
@@ -124,17 +127,17 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
     }
 
     /// Flush framebuffer to screen.
-    pub fn flush(&mut self) -> Result {
+    pub async fn flush(&mut self) -> Result {
         let rect = self.rect.ok_or(Error::NotReady)?;
         // copy data from guest to host
-        self.transfer_to_host_2d(rect, 0, RESOURCE_ID_FB)?;
+        self.transfer_to_host_2d(rect, 0, RESOURCE_ID_FB).await?;
         // flush data to screen
-        self.resource_flush(rect, RESOURCE_ID_FB)?;
+        self.resource_flush(rect, RESOURCE_ID_FB).await?;
         Ok(())
     }
 
     /// Set the pointer shape and position.
-    pub fn setup_cursor(
+    pub async fn setup_cursor(
         &mut self,
         cursor_image: &[u8],
         pos_x: u32,
@@ -150,9 +153,12 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
         let buf = unsafe { cursor_buffer_dma.raw_slice().as_mut() };
         buf.copy_from_slice(cursor_image);
 
-        self.resource_create_2d(RESOURCE_ID_CURSOR, CURSOR_RECT.width, CURSOR_RECT.height)?;
-        self.resource_attach_backing(RESOURCE_ID_CURSOR, cursor_buffer_dma.paddr() as u64, size)?;
-        self.transfer_to_host_2d(CURSOR_RECT, 0, RESOURCE_ID_CURSOR)?;
+        self.resource_create_2d(RESOURCE_ID_CURSOR, CURSOR_RECT.width, CURSOR_RECT.height)
+            .await?;
+        self.resource_attach_backing(RESOURCE_ID_CURSOR, cursor_buffer_dma.paddr() as u64, size)
+            .await?;
+        self.transfer_to_host_2d(CURSOR_RECT, 0, RESOURCE_ID_CURSOR)
+            .await?;
         self.update_cursor(
             RESOURCE_ID_CURSOR,
             SCANOUT_ID,
@@ -161,101 +167,119 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
             hot_x,
             hot_y,
             false,
-        )?;
+        )
+        .await?;
         self.cursor_buffer_dma = Some(cursor_buffer_dma);
         Ok(())
     }
 
     /// Move the pointer without updating the shape.
-    pub fn move_cursor(&mut self, pos_x: u32, pos_y: u32) -> Result {
-        self.update_cursor(RESOURCE_ID_CURSOR, SCANOUT_ID, pos_x, pos_y, 0, 0, true)?;
+    pub async fn move_cursor(&mut self, pos_x: u32, pos_y: u32) -> Result {
+        self.update_cursor(RESOURCE_ID_CURSOR, SCANOUT_ID, pos_x, pos_y, 0, 0, true)
+            .await?;
         Ok(())
     }
 
     /// Send a request to the device and block for a response.
-    fn request<Req: AsBytes, Rsp: FromBytes>(&mut self, req: Req) -> Result<Rsp> {
+    async fn request<Req: AsBytes, Rsp: FromBytes>(&mut self, req: Req) -> Result<Rsp> {
         req.write_to_prefix(&mut self.queue_buf_send).unwrap();
-        self.control_queue.add_notify_wait_pop(
-            &[&self.queue_buf_send],
-            &mut [&mut self.queue_buf_recv],
-            &mut self.transport,
-        )?;
+        self.control_queue
+            .add_notify_wait_pop(
+                &[&self.queue_buf_send],
+                &mut [&mut self.queue_buf_recv],
+                &mut self.transport,
+            )
+            .await?;
         Ok(Rsp::read_from_prefix(&self.queue_buf_recv).unwrap())
     }
 
     /// Send a mouse cursor operation request to the device and block for a response.
-    fn cursor_request<Req: AsBytes>(&mut self, req: Req) -> Result {
+    async fn cursor_request<Req: AsBytes>(&mut self, req: Req) -> Result {
         req.write_to_prefix(&mut self.queue_buf_send).unwrap();
-        self.cursor_queue.add_notify_wait_pop(
-            &[&self.queue_buf_send],
-            &mut [],
-            &mut self.transport,
-        )?;
+        self.cursor_queue
+            .add_notify_wait_pop(&[&self.queue_buf_send], &mut [], &mut self.transport)
+            .await?;
         Ok(())
     }
 
-    fn get_display_info(&mut self) -> Result<RespDisplayInfo> {
-        let info: RespDisplayInfo =
-            self.request(CtrlHeader::with_type(Command::GET_DISPLAY_INFO))?;
+    async fn get_display_info(&mut self) -> Result<RespDisplayInfo> {
+        let info: RespDisplayInfo = self
+            .request(CtrlHeader::with_type(Command::GET_DISPLAY_INFO))
+            .await?;
         info.header.check_type(Command::OK_DISPLAY_INFO)?;
         Ok(info)
     }
 
-    fn resource_create_2d(&mut self, resource_id: u32, width: u32, height: u32) -> Result {
-        let rsp: CtrlHeader = self.request(ResourceCreate2D {
-            header: CtrlHeader::with_type(Command::RESOURCE_CREATE_2D),
-            resource_id,
-            format: Format::B8G8R8A8UNORM,
-            width,
-            height,
-        })?;
+    async fn resource_create_2d(&mut self, resource_id: u32, width: u32, height: u32) -> Result {
+        let rsp: CtrlHeader = self
+            .request(ResourceCreate2D {
+                header: CtrlHeader::with_type(Command::RESOURCE_CREATE_2D),
+                resource_id,
+                format: Format::B8G8R8A8UNORM,
+                width,
+                height,
+            })
+            .await?;
         rsp.check_type(Command::OK_NODATA)
     }
 
-    fn set_scanout(&mut self, rect: Rect, scanout_id: u32, resource_id: u32) -> Result {
-        let rsp: CtrlHeader = self.request(SetScanout {
-            header: CtrlHeader::with_type(Command::SET_SCANOUT),
-            rect,
-            scanout_id,
-            resource_id,
-        })?;
+    async fn set_scanout(&mut self, rect: Rect, scanout_id: u32, resource_id: u32) -> Result {
+        let rsp: CtrlHeader = self
+            .request(SetScanout {
+                header: CtrlHeader::with_type(Command::SET_SCANOUT),
+                rect,
+                scanout_id,
+                resource_id,
+            })
+            .await?;
         rsp.check_type(Command::OK_NODATA)
     }
 
-    fn resource_flush(&mut self, rect: Rect, resource_id: u32) -> Result {
-        let rsp: CtrlHeader = self.request(ResourceFlush {
-            header: CtrlHeader::with_type(Command::RESOURCE_FLUSH),
-            rect,
-            resource_id,
-            _padding: 0,
-        })?;
+    async fn resource_flush(&mut self, rect: Rect, resource_id: u32) -> Result {
+        let rsp: CtrlHeader = self
+            .request(ResourceFlush {
+                header: CtrlHeader::with_type(Command::RESOURCE_FLUSH),
+                rect,
+                resource_id,
+                _padding: 0,
+            })
+            .await?;
         rsp.check_type(Command::OK_NODATA)
     }
 
-    fn transfer_to_host_2d(&mut self, rect: Rect, offset: u64, resource_id: u32) -> Result {
-        let rsp: CtrlHeader = self.request(TransferToHost2D {
-            header: CtrlHeader::with_type(Command::TRANSFER_TO_HOST_2D),
-            rect,
-            offset,
-            resource_id,
-            _padding: 0,
-        })?;
+    async fn transfer_to_host_2d(&mut self, rect: Rect, offset: u64, resource_id: u32) -> Result {
+        let rsp: CtrlHeader = self
+            .request(TransferToHost2D {
+                header: CtrlHeader::with_type(Command::TRANSFER_TO_HOST_2D),
+                rect,
+                offset,
+                resource_id,
+                _padding: 0,
+            })
+            .await?;
         rsp.check_type(Command::OK_NODATA)
     }
 
-    fn resource_attach_backing(&mut self, resource_id: u32, paddr: u64, length: u32) -> Result {
-        let rsp: CtrlHeader = self.request(ResourceAttachBacking {
-            header: CtrlHeader::with_type(Command::RESOURCE_ATTACH_BACKING),
-            resource_id,
-            nr_entries: 1,
-            addr: paddr,
-            length,
-            _padding: 0,
-        })?;
+    async fn resource_attach_backing(
+        &mut self,
+        resource_id: u32,
+        paddr: u64,
+        length: u32,
+    ) -> Result {
+        let rsp: CtrlHeader = self
+            .request(ResourceAttachBacking {
+                header: CtrlHeader::with_type(Command::RESOURCE_ATTACH_BACKING),
+                resource_id,
+                nr_entries: 1,
+                addr: paddr,
+                length,
+                _padding: 0,
+            })
+            .await?;
         rsp.check_type(Command::OK_NODATA)
     }
 
-    fn update_cursor(
+    async fn update_cursor(
         &mut self,
         resource_id: u32,
         scanout_id: u32,
@@ -282,6 +306,7 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
             hot_y,
             _padding: 0,
         })
+        .await
     }
 }
 

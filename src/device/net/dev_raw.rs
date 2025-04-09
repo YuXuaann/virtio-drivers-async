@@ -237,22 +237,18 @@ impl<H: Hal, T: Transport, const QUEUE_SIZE: usize> VirtIONetRaw<H, T, QUEUE_SIZ
     }
 
     /// Sends a packet to the network, and blocks until the request completed.
-    pub fn send(&mut self, tx_buf: &[u8]) -> Result {
+    pub async fn send(&mut self, tx_buf: &[u8]) -> Result {
         let header = VirtioNetHdr::default();
         if tx_buf.is_empty() {
             // Special case sending an empty packet, to avoid adding an empty buffer to the
             // virtqueue.
-            self.send_queue.add_notify_wait_pop(
-                &[header.as_bytes()],
-                &mut [],
-                &mut self.transport,
-            )?;
+            self.send_queue
+                .add_notify_wait_pop(&[header.as_bytes()], &mut [], &mut self.transport)
+                .await?;
         } else {
-            self.send_queue.add_notify_wait_pop(
-                &[header.as_bytes(), tx_buf],
-                &mut [],
-                &mut self.transport,
-            )?;
+            self.send_queue
+                .add_notify_wait_pop(&[header.as_bytes(), tx_buf], &mut [], &mut self.transport)
+                .await?;
         }
         Ok(())
     }

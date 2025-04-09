@@ -1,5 +1,5 @@
 [package]
-name = "virtio-drivers"
+name = "virtio-drivers-async"
 version = "0.7.5"
 license = "MIT"
 authors = [
@@ -9,7 +9,7 @@ authors = [
   "Andrew Walbran <qwandor@google.com>",
 ]
 edition = "2021"
-description = "VirtIO guest drivers."
+description = "VirtIO guest drivers with async support, now support blkdev"
 repository = "https://github.com/rcore-os/virtio-drivers"
 keywords = ["virtio"]
 categories = ["hardware-support", "no-std"]
@@ -19,6 +19,9 @@ log = "0.4.22"
 bitflags = "2.6.0"
 enumn = "0.1.14"
 zerocopy = { version = "0.7.35", features = ["derive"] }
+futures-lite = { version = "1.13.0", default-features = false, features = [
+  "alloc",
+] }
 
 [features]
 default = ["alloc"]
