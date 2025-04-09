@@ -49,6 +49,9 @@ pub struct VirtIOBlk<H: Hal, T: Transport> {
     negotiated_features: BlkFeature,
 }
 
+unsafe impl<H: Hal, T: Transport + Send> Send for VirtIOBlk<H, T> {}
+unsafe impl<H: Hal, T: Transport + Sync> Sync for VirtIOBlk<H, T> {}
+
 impl<H: Hal, T: Transport> VirtIOBlk<H, T> {
     /// Create a new VirtIO-Blk driver.
     pub fn new(mut transport: T) -> Result<Self> {
