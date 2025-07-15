@@ -8,6 +8,7 @@ use crate::{
 use alloc::{sync::Arc, vec::Vec};
 use core::{
     fmt::{self, Debug, Formatter},
+    mem::{align_of, size_of},
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };

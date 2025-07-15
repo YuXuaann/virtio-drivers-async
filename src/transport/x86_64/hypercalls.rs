@@ -1,6 +1,6 @@
 //! Hypercalls for x86-64 pKVM.
 
-use core::arch::asm;
+use core::{arch::asm, mem::size_of};
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 /// This CPUID returns the signature and should be used to determine if VM is running under pKVM,

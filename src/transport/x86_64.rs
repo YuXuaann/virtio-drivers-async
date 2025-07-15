@@ -3,6 +3,8 @@
 mod cam;
 mod hypercalls;
 
+use core::mem::{align_of, size_of};
+
 use super::{
     pci::{
         bus::{ConfigurationAccess, DeviceFunction, PciRoot, PCI_CAP_ID_VNDR},
