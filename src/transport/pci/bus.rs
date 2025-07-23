@@ -93,7 +93,8 @@ pub enum PciError {
 /// The root complex of a PCI bus.
 #[derive(Debug)]
 pub struct PciRoot<C: ConfigurationAccess> {
-    pub(crate) configuration_access: C,
+    /// The configuration access mechanism to use for this PCI root complex.
+    pub configuration_access: C,
 }
 
 /// A PCI Configuration Access Mechanism.
@@ -291,6 +292,86 @@ impl<C: ConfigurationAccess> PciRoot<C> {
         } else {
             None
         }
+    }
+
+    /// Reads from PCI configuration space with arbitrary size and offset.
+    pub fn read_config(&self, device_function: DeviceFunction, offset: u8, size: u8) -> u32 {
+        match size {
+            1 => {
+                let word = self
+                    .configuration_access
+                    .read_word(device_function, offset & !3);
+                (word >> ((offset & 3) * 8)) & 0xFF
+            }
+            2 => {
+                let word = self
+                    .configuration_access
+                    .read_word(device_function, offset & !3);
+                (word >> ((offset & 3) * 8)) & 0xFFFF
+            }
+            4 => self.configuration_access.read_word(device_function, offset),
+            _ => panic!("Invalid config read size: {}", size),
+        }
+    }
+
+    /// Writes to PCI configuration space with arbitrary size and offset.
+    pub fn write_config(
+        &mut self,
+        device_function: DeviceFunction,
+        offset: u8,
+        size: u8,
+        data: u32,
+    ) {
+        match size {
+            1 => {
+                let word_offset = offset & !3;
+                let bit_offset = (offset & 3) * 8;
+                let word = self
+                    .configuration_access
+                    .read_word(device_function, word_offset);
+                let mask = !(0xFF << bit_offset);
+                let new_word = (word & mask) | ((data & 0xFF) << bit_offset);
+                self.configuration_access
+                    .write_word(device_function, word_offset, new_word);
+            }
+            2 => {
+                let word_offset = offset & !3;
+                let bit_offset = (offset & 3) * 8;
+                let word = self
+                    .configuration_access
+                    .read_word(device_function, word_offset);
+                let mask = !(0xFFFF << bit_offset);
+                let new_word = (word & mask) | ((data & 0xFFFF) << bit_offset);
+                self.configuration_access
+                    .write_word(device_function, word_offset, new_word);
+            }
+            4 => self
+                .configuration_access
+                .write_word(device_function, offset, data),
+            _ => panic!("Invalid config write size: {}", size),
+        }
+    }
+
+    /// Finds a PCI capability by capability ID.
+    pub fn find_capability(&self, device_function: DeviceFunction, cap_id: u8) -> Option<u8> {
+        let cap_ptr = self.capabilities_offset(device_function)?;
+        let mut current_ptr = cap_ptr;
+
+        while current_ptr != 0 {
+            let cap_word = self
+                .configuration_access
+                .read_word(device_function, current_ptr);
+            let current_cap_id = (cap_word & 0xFF) as u8;
+            let next_cap_ptr = ((cap_word >> 8) & 0xFF) as u8;
+
+            if current_cap_id == cap_id {
+                return Some(current_ptr);
+            }
+
+            current_ptr = next_cap_ptr;
+        }
+
+        None
     }
 }
 
